@@ -531,11 +531,11 @@ function main() {
   const algorithms = [
     drawLuminousSurface,
     drawWireframe,
-    drawCrossSections,
+    drawStringParticles,
     drawSpectralCloud,
     drawMultiBody,
     drawTopologicalLayers,
-    drawStringParticles,
+    drawCrossSections,
   ];
   // 依日期輪替演算法（每天固定一種，7 天一輪）
   const dayOfYear = Math.floor(
