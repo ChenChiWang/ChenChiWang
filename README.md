@@ -2,7 +2,7 @@
   <img src="art.gif" alt="Calabi-Yau Manifold" width="900" />
 </p>
 <p align="center">
-  <sub>Calabi-Yau manifold — auto-generated daily from the mathematics of string theory</sub>
+  <sub> Auto-generated daily from the mathematics of string theory</sub>
 </p>
 
 ---
