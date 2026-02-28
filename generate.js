@@ -7,8 +7,8 @@ const WIDTH = 900;
 const HEIGHT = 400;
 const CX = WIDTH / 2;
 const CY_CENTER = HEIGHT / 2;
-const FRAMES = 90;
-const FRAME_DELAY = 33;
+const FRAMES = 150;
+const FRAME_DELAY = 45;
 
 // 用當天日期當 seed
 const today = new Date().toISOString().slice(0, 10);
@@ -506,7 +506,11 @@ function main() {
     drawTopologicalLayers,
     drawStringParticles,
   ];
-  const algo = pick(algorithms);
+  // 依日期輪替演算法（每天固定一種，7 天一輪）
+  const dayOfYear = Math.floor(
+    (new Date(today) - new Date(today.slice(0, 4) + '-01-01')) / 86400000
+  );
+  const algo = algorithms[dayOfYear % algorithms.length];
 
   // 固定參數（整段動畫不變），只有 rotY 逐幀遞增
   const n = pick([3, 4, 5, 6]);
