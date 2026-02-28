@@ -372,13 +372,16 @@ function drawStringParticles(ctx, palette, params) {
   const { n, k2, rotX, rotY, rotZ, scale, progress = 0 } = params;
   const tau = Math.PI * 2;
   const t = progress; // 0→1 無縫循環
+  const PHI = (1 + Math.sqrt(5)) / 2; // 黃金比例，用於分散相位
   const alphaSteps = 80;
   const betaSteps = 18;
   const betaMin = 0.05;
   const betaMax = Math.PI / 2 - 0.05;
 
-  // 視角只做微幅擺動（±12°），不做整圈旋轉
-  const viewRotY = rotY * 0.05 + Math.sin(t * tau) * 0.2;
+  // 視角緩慢擺動，用多頻 sin 疊加避免單一週期感
+  const viewRotY = rotY * 0.03
+    + Math.sin(t * tau) * 0.12
+    + Math.sin(t * tau * 3 + 1.2) * 0.04;
 
   // 收集所有線段資料
   const lines = [];
@@ -393,9 +396,13 @@ function drawStringParticles(ctx, palette, params) {
         const p4d = calabiYauPoint(n, alpha, beta, k1, k2);
         const p2d = projectTo2D(p4d, rotX, viewRotY, rotZ);
 
-        // 波動位移：沿曲線方向的正弦擾動，各線相位不同
-        const waveAmp = 2.5 + (bi / betaSteps) * 2;
-        const wave = Math.sin(t * tau * 2 + lineIdx * 0.7 + (ai / alphaSteps) * tau * 1.5) * waveAmp;
+        // 波動：多頻疊加避免規律感
+        const pos = ai / alphaSteps;
+        const waveAmp = 1.5 + (bi / betaSteps) * 1.5;
+        const wave = (
+          Math.sin(t * tau * 2 + lineIdx * PHI * tau + pos * tau * 1.5) * 0.6
+          + Math.sin(t * tau * 3 + lineIdx * 1.3 + pos * tau * 2.7) * 0.4
+        ) * waveAmp;
 
         pts.push({
           sx: CX + p2d.x * scale + wave * Math.cos(alpha + Math.PI / 2),
@@ -417,8 +424,12 @@ function drawStringParticles(ctx, palette, params) {
         const p4d = calabiYauPoint(n, alpha, beta, k1, k2);
         const p2d = projectTo2D(p4d, rotX, viewRotY, rotZ);
 
-        const waveAmp = 2;
-        const wave = Math.sin(t * tau * 2 + lineIdx * 0.5 + (bi / betaSteps) * tau * 1.5) * waveAmp;
+        const pos = bi / betaSteps;
+        const waveAmp = 1.5;
+        const wave = (
+          Math.sin(t * tau * 2 + lineIdx * PHI * tau + pos * tau * 1.5) * 0.6
+          + Math.sin(t * tau * 3 + lineIdx * 1.1 + pos * tau * 2.3) * 0.4
+        ) * waveAmp;
 
         pts.push({
           sx: CX + p2d.x * scale + wave * Math.sin(alpha),
@@ -447,44 +458,37 @@ function drawStringParticles(ctx, palette, params) {
 
   for (const line of lines) {
     const depthNorm = (line.avgDepth - globalMinD) / depthRange;
-    const phase = line.lineIdx * 0.37;
 
-    // 呼吸脈動：影響線寬與亮度
-    const breath = 0.5 + 0.5 * Math.sin(t * tau + phase * 3);
+    // 用黃金比例分散相位，避免同步脈動
+    const phase = line.lineIdx * PHI;
 
-    // 線條生長進度：各線錯開，在 30%~100% 之間脈動
-    const drawProgress = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(t * tau - phase * 5));
-    const visibleCount = Math.floor(drawProgress * line.pts.length);
-    if (visibleCount < 2) continue;
+    // 呼吸：多頻疊加，幅度收小，避免整體同步感
+    const breath = 0.7 + 0.3 * (
+      Math.sin(t * tau + phase * tau) * 0.5
+      + Math.sin(t * tau * 2 + phase * 2.3) * 0.3
+      + Math.sin(t * tau * 5 + phase * 0.7) * 0.2
+    );
 
-    // 繪製弦線（只畫可見段）
+    // 線條全部顯示，改用透明度漸變代替截斷來製造動態
+    // 不再用 visibleCount 截斷，消除分段感
     ctx.beginPath();
     ctx.strokeStyle = line.color;
-    ctx.lineWidth = (0.4 + depthNorm * 1.2) * (0.6 + breath * 0.8);
-    ctx.globalAlpha = (0.15 + depthNorm * 0.45) * (0.5 + breath * 0.5);
-    for (let i = 0; i < visibleCount; i++) {
+    ctx.lineWidth = (0.4 + depthNorm * 1.2) * (0.7 + breath * 0.5);
+    ctx.globalAlpha = (0.15 + depthNorm * 0.45) * breath;
+    for (let i = 0; i < line.pts.length; i++) {
       const p = line.pts[i];
       if (i === 0) ctx.moveTo(p.sx, p.sy);
       else ctx.lineTo(p.sx, p.sy);
     }
     ctx.stroke();
 
-    // 生長端亮點
-    if (visibleCount > 0 && visibleCount < line.pts.length) {
-      const tip = line.pts[visibleCount - 1];
-      ctx.globalAlpha = 0.4 * breath;
-      ctx.fillStyle = '#FFFFFF';
-      ctx.beginPath();
-      ctx.arc(tip.sx, tip.sy, 2 + depthNorm * 2.5, 0, tau);
-      ctx.fill();
-    }
-
-    // 粒子沿已繪製段流動
+    // 粒子沿線條流動
     const particleCount = Math.floor(3 + depthNorm * 6);
     for (let pi = 0; pi < particleCount; pi++) {
-      const rawT = (pi / particleCount + t * 2 + phase) % 1;
-      const drawT = rawT * drawProgress;
-      const idx = drawT * (line.pts.length - 1);
+      // 用黃金比例分佈粒子初始位置，加上不同速度的流動
+      const speed = 1 + (line.lineIdx % 3) * 0.5;
+      const rawT = ((pi * PHI + t * speed + phase * 0.1) % 1);
+      const idx = rawT * (line.pts.length - 1);
       const i0 = Math.floor(idx);
       const i1 = Math.min(i0 + 1, line.pts.length - 1);
       const frac = idx - i0;
@@ -494,21 +498,24 @@ function drawStringParticles(ctx, palette, params) {
       const pDepthNorm = (pDepth - globalMinD) / depthRange;
       const radius = 1.0 + pDepthNorm * 2.5;
 
+      // 粒子自身脈動（各粒子不同相位）
+      const pBreath = 0.6 + 0.4 * Math.sin(t * tau * 3 + pi * PHI * tau + phase);
+
       // 外層光暈
-      ctx.globalAlpha = (0.06 + pDepthNorm * 0.1) * breath;
+      ctx.globalAlpha = (0.05 + pDepthNorm * 0.1) * pBreath;
       ctx.fillStyle = line.color;
       ctx.beginPath();
       ctx.arc(px, py, radius * 3, 0, tau);
       ctx.fill();
 
       // 中層光暈
-      ctx.globalAlpha = (0.15 + pDepthNorm * 0.25) * breath;
+      ctx.globalAlpha = (0.12 + pDepthNorm * 0.2) * pBreath;
       ctx.beginPath();
       ctx.arc(px, py, radius * 1.6, 0, tau);
       ctx.fill();
 
       // 核心亮點
-      ctx.globalAlpha = (0.5 + pDepthNorm * 0.4) * (0.6 + breath * 0.4);
+      ctx.globalAlpha = (0.4 + pDepthNorm * 0.4) * pBreath;
       ctx.fillStyle = '#FFFFFF';
       ctx.beginPath();
       ctx.arc(px, py, radius * 0.6, 0, tau);
