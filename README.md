@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="art.gif" alt="Calabi-Yau Manifold" width="900" />
+  <img src="https://raw.githubusercontent.com/ChenChiWang/ChenChiWang/main/art.gif" alt="Calabi-Yau Manifold" width="900" />
 </p>
 <p align="center">
   <sub> Auto-generated daily from the mathematics of string theory</sub>
