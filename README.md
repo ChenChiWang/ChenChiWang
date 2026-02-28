@@ -24,8 +24,8 @@ Based in Germany. MBA from National Yang Ming Chiao Tung University.
 - Automation bots ([Discord](https://github.com/ChenChiWang/webhook-discord-bot), [MT4/5 Line Notify](https://github.com/ChenChiWang/MT45LineNotifyMsg))
 - Hardware tinkering ([Raspberry Pi dual display](https://github.com/ChenChiWang/pi_dual_display))
 
-**Elsewhere**
+<!-- **Elsewhere** -->
 
-[Blog](https://chenchiwang.github.io) · [LinkedIn](https://www.linkedin.com/in/john-wang-5bb70bb3/)
+<!-- $[Blog](https://chenchiwang.github.io) · [LinkedIn](https://www.linkedin.com/in/john-wang-5bb70bb3/)$ -->
 
 <sub>Ich lerne gerade Deutsch 🇩🇪</sub>

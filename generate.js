@@ -365,6 +365,128 @@ function drawTopologicalLayers(ctx, palette, params) {
 }
 
 // ============================================================
+// 演算法 7：弦與粒子
+// ============================================================
+function drawStringParticles(ctx, palette, params) {
+  const { n, k2, rotX, rotY, rotZ, scale } = params;
+  const alphaSteps = 80;
+  const betaSteps = 18;
+  const betaMin = 0.05;
+  const betaMax = Math.PI / 2 - 0.05;
+
+  // 收集所有線段資料，依深度排序繪製
+  const lines = [];
+  for (let k1 = 0; k1 < n; k1++) {
+    // alpha 方向弦線
+    for (let bi = 0; bi <= betaSteps; bi += 2) {
+      const beta = betaMin + (bi / betaSteps) * (betaMax - betaMin);
+      const pts = [];
+      for (let ai = 0; ai <= alphaSteps; ai++) {
+        const alpha = (ai / alphaSteps) * (2 * Math.PI) / n;
+        const p4d = calabiYauPoint(n, alpha, beta, k1, k2);
+        const p2d = projectTo2D(p4d, rotX, rotY, rotZ);
+        pts.push({
+          sx: CX + p2d.x * scale,
+          sy: CY_CENTER + p2d.y * scale,
+          depth: p2d.depth,
+          t: ai / alphaSteps,
+        });
+      }
+      const avgDepth = pts.reduce((s, p) => s + p.depth, 0) / pts.length;
+      lines.push({ pts, color: palette[k1 % palette.length], avgDepth, k1, beta: bi / betaSteps });
+    }
+
+    // beta 方向弦線（較稀疏）
+    for (let ai = 0; ai <= alphaSteps; ai += 5) {
+      const alpha = (ai / alphaSteps) * (2 * Math.PI) / n;
+      const pts = [];
+      for (let bi = 0; bi <= betaSteps; bi++) {
+        const beta = betaMin + (bi / betaSteps) * (betaMax - betaMin);
+        const p4d = calabiYauPoint(n, alpha, beta, k1, k2);
+        const p2d = projectTo2D(p4d, rotX, rotY, rotZ);
+        pts.push({
+          sx: CX + p2d.x * scale,
+          sy: CY_CENTER + p2d.y * scale,
+          depth: p2d.depth,
+          t: bi / betaSteps,
+        });
+      }
+      const avgDepth = pts.reduce((s, p) => s + p.depth, 0) / pts.length;
+      lines.push({ pts, color: palette[(k1 + 2) % palette.length], avgDepth, k1, beta: 0.5 });
+    }
+  }
+
+  // 依深度排序（遠的先畫）
+  lines.sort((a, b) => a.avgDepth - b.avgDepth);
+
+  // 計算全域深度範圍（用於正規化）
+  let globalMinD = Infinity, globalMaxD = -Infinity;
+  for (const line of lines) {
+    for (const p of line.pts) {
+      if (p.depth < globalMinD) globalMinD = p.depth;
+      if (p.depth > globalMaxD) globalMaxD = p.depth;
+    }
+  }
+  const depthRange = globalMaxD - globalMinD || 1;
+
+  // 用 rotY 驅動粒子流動偏移
+  const flowOffset = (rotY % (2 * Math.PI)) / (2 * Math.PI);
+
+  for (const line of lines) {
+    const depthNorm = (line.avgDepth - globalMinD) / depthRange;
+
+    // 繪製弦線
+    ctx.beginPath();
+    ctx.strokeStyle = line.color;
+    ctx.lineWidth = 0.4 + depthNorm * 1.2;
+    ctx.globalAlpha = 0.15 + depthNorm * 0.45;
+    for (let i = 0; i < line.pts.length; i++) {
+      const p = line.pts[i];
+      if (i === 0) ctx.moveTo(p.sx, p.sy);
+      else ctx.lineTo(p.sx, p.sy);
+    }
+    ctx.stroke();
+
+    // 在弦線上散佈粒子
+    const particleCount = Math.floor(4 + depthNorm * 8);
+    for (let pi = 0; pi < particleCount; pi++) {
+      // 粒子位置沿線條分佈，加上流動偏移
+      const rawT = (pi / particleCount + flowOffset + line.k1 * 0.13) % 1;
+      const idx = rawT * (line.pts.length - 1);
+      const i0 = Math.floor(idx);
+      const i1 = Math.min(i0 + 1, line.pts.length - 1);
+      const frac = idx - i0;
+      const px = line.pts[i0].sx + (line.pts[i1].sx - line.pts[i0].sx) * frac;
+      const py = line.pts[i0].sy + (line.pts[i1].sy - line.pts[i0].sy) * frac;
+      const pDepth = line.pts[i0].depth + (line.pts[i1].depth - line.pts[i0].depth) * frac;
+      const pDepthNorm = (pDepth - globalMinD) / depthRange;
+
+      const radius = 1.0 + pDepthNorm * 2.5;
+
+      // 外層光暈
+      ctx.globalAlpha = 0.08 + pDepthNorm * 0.12;
+      ctx.fillStyle = line.color;
+      ctx.beginPath();
+      ctx.arc(px, py, radius * 3, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 中層光暈
+      ctx.globalAlpha = 0.2 + pDepthNorm * 0.3;
+      ctx.beginPath();
+      ctx.arc(px, py, radius * 1.6, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 核心亮點
+      ctx.globalAlpha = 0.6 + pDepthNorm * 0.4;
+      ctx.fillStyle = '#FFFFFF';
+      ctx.beginPath();
+      ctx.arc(px, py, radius * 0.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+// ============================================================
 // 主程式
 // ============================================================
 function main() {
@@ -382,6 +504,7 @@ function main() {
     drawSpectralCloud,
     drawMultiBody,
     drawTopologicalLayers,
+    drawStringParticles,
   ];
   const algo = pick(algorithms);
 
