@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/ChenChiWang/ChenChiWang/main/art.gif" alt="Calabi-Yau Manifold" width="900" />
+  <img src="https://raw.githubusercontent.com/ChenChiWang/ChenChiWang/main/art.svg" alt="Mathematical Visualization" width="900" />
 </p>
 <p align="center">
-  <sub> Auto-generated daily from the mathematics of string theory</sub>
+  <sub>Auto-generated daily from the mathematics of string theory & higher-dimensional geometry</sub>
 </p>
 
 ---

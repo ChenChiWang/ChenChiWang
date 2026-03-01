@@ -1,32 +1,13 @@
-const { createCanvas } = require('@napi-rs/canvas');
-const { GIFEncoder, quantize, applyPalette } = require('gifenc');
 const seedRandom = require('seed-random');
 const fs = require('fs');
 
 const WIDTH = 900;
 const HEIGHT = 400;
 const CX = WIDTH / 2;
-const CY_CENTER = HEIGHT / 2;
-const FRAMES = 150;
-const FRAME_DELAY = 45;
+const CY = HEIGHT / 2;
 
-// 用當天日期當 seed
 const today = new Date().toISOString().slice(0, 10);
 const random = seedRandom(today);
-
-// Calabi-Yau 主題調色盤
-const PALETTES = [
-  ['#E0AAFF', '#C77DFF', '#9D4EDD', '#7B2CBF', '#5A189A'],
-  ['#CAF0F8', '#90E0EF', '#00B4D8', '#0077B6', '#03045E'],
-  ['#FFF8E1', '#FFE082', '#FFB300', '#FF8F00', '#E65100'],
-  ['#B7E4C7', '#74C69D', '#52B788', '#2D6A4F', '#1B4332'],
-  ['#FFE5EC', '#FFB3C6', '#FF8FAB', '#FB6F92', '#C9184A'],
-  ['#00F5D4', '#00BBF9', '#9B5DE5', '#F15BB5', '#FEE440'],
-  ['#D6E4F0', '#8BB8D6', '#4A90BD', '#2C6A9E', '#0D3B66'],
-  ['#FFDDB5', '#FFB347', '#FF8C00', '#CC5500', '#8B3A00'],
-  ['#F0F4F8', '#C9D6DF', '#91ABB9', '#5A8296', '#2E4756'],
-  ['#C3B1E1', '#957FEF', '#6C49D8', '#4A1FA0', '#2E0F6E'],
-];
 
 // ============================================================
 // 工具函式
@@ -44,563 +25,218 @@ function pick(arr) {
   return arr[randInt(0, arr.length - 1)];
 }
 
-function shuffle(arr) {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = randInt(0, i);
-    [a[i], a[j]] = [a[j], a[i]];
+function hsl(h, s, l) {
+  return `hsl(${((h % 360) + 360) % 360},${s}%,${l}%)`;
+}
+
+// 閉合路徑：整數座標節省 ~30% 字元，視覺無差異
+function pointsToDClosed(pts) {
+  return pts.map((p, i) =>
+    `${i === 0 ? 'M' : 'L'}${Math.round(p.x)},${Math.round(p.y)}`
+  ).join('') + 'Z';
+}
+
+const PHI = (1 + Math.sqrt(5)) / 2;
+const TAU = Math.PI * 2;
+
+// ============================================================
+// Calabi-Yau 參數方程式（完全對應 p5.js）
+// ============================================================
+// 每個 k 截面：alpha 0→2π 產生一個完整的閉合瓣形。
+// 末尾 Z 指令連回起點，讓每個維度自成閉環。
+// n 個 k 在空間上相關聯銜接（共享端點附近區域），
+// 但各自獨立閉合，擁有各自的顏色與維度身份。
+
+function computeCurvePoints(n, k, angle, layer, scale, daily) {
+  const steps = 90;
+  const gap = 0.12;
+  const pts = [];
+
+  for (let i = 0; i <= steps; i++) {
+    const alpha = gap + (i / steps) * (TAU - 2 * gap);
+    const theta = (alpha + TAU * k) / n;
+    let px, py;
+
+    if (layer === 'outer') {
+      const x = Math.cos(theta + angle * 0.5);
+      const y = Math.sin(theta + angle * 0.3);
+      // 呼吸：空間結構(alpha*n) + 不急不徐的時間節奏(breathRate)
+      const twist = Math.sin(alpha * n + angle * daily.breathRate + daily.phase) * daily.twistAmp;
+      px = (x * Math.cos(twist) - y * Math.sin(twist)) * scale;
+      py = (x * Math.sin(twist) + y * Math.cos(twist)) * scale;
+    } else {
+      const r = Math.pow(daily.innerWave + (1 - daily.innerWave) * Math.sin(alpha * n), 1 / n);
+      const x = r * Math.cos(theta + angle * 0.7);
+      const y = r * Math.sin(theta + angle * 0.5);
+      // 內層呼吸略慢（×0.7），像更深層的韻律
+      const twist = Math.cos(alpha * n - angle * daily.breathRate * 0.7 + daily.phase * 0.7) * daily.twistAmp * 1.2;
+      px = (x * Math.cos(twist) - y * Math.sin(twist)) * scale * daily.innerScale;
+      py = (x * Math.sin(twist) + y * Math.cos(twist)) * scale * daily.innerScale;
+    }
+
+    pts.push({ x: px, y: py });
   }
-  return a;
-}
 
-function lerpColor(hex1, hex2, t) {
-  const r1 = parseInt(hex1.slice(1, 3), 16);
-  const g1 = parseInt(hex1.slice(3, 5), 16);
-  const b1 = parseInt(hex1.slice(5, 7), 16);
-  const r2 = parseInt(hex2.slice(1, 3), 16);
-  const g2 = parseInt(hex2.slice(3, 5), 16);
-  const b2 = parseInt(hex2.slice(5, 7), 16);
-  const r = Math.round(r1 + (r2 - r1) * t);
-  const g = Math.round(g1 + (g2 - g1) * t);
-  const b = Math.round(b1 + (b2 - b1) * t);
-  return `rgb(${r},${g},${b})`;
+  return pointsToDClosed(pts);
 }
 
 // ============================================================
-// Calabi-Yau 流形核心數學
-// Fermat 曲面: z1^n + z2^n = 1 in C^2
+// 主生成函式
 // ============================================================
+// 動畫週期 120s，角度循環 20π（所有係數 LCM），
+// 速率 ≈ 0.52 rad/s（接近 p5.js 的 0.3 rad/s 慢速優雅感）。
+// 每個 k 有：核心線 + 殘影（幀偏移 1）+ 內層結構 = 3 paths。
 
-function calabiYauPoint(n, alpha, beta, k1, k2) {
-  const cb = Math.pow(Math.cos(beta), 2 / n);
-  const sb = Math.pow(Math.sin(beta), 2 / n);
-  const phase1 = alpha + (2 * Math.PI * k1) / n;
-  const phase2 = -alpha + (2 * Math.PI * k2) / n;
-  return {
-    x: cb * Math.cos(phase1),
-    y: cb * Math.sin(phase1),
-    z: sb * Math.cos(phase2),
-    w: sb * Math.sin(phase2),
+function generateCalabiYau(n) {
+  const scale = randFloat(120, 155);
+  const FRAMES = Math.min(72, Math.floor(520 / n));
+  const ANGLE_CYCLE = 20 * Math.PI;
+  const hueOffset = randFloat(0, 360);
+
+  // ── 每日隨機變量 ──
+  // twistAmp = 生命力：有的日子氣息深沉，有的日子輕淺
+  // breathRate = 呼吸節奏：永遠不急不徐，3~5 次 / 120s 週期
+  // phase = 每天的起始姿態
+  const daily = {
+    twistAmp: randFloat(0.8, Math.PI),   // 生命力（振幅）
+    breathRate: randFloat(3, 5) / 10,    // 呼吸頻率（angle 每 20π 走 3~5 個完整週期）
+    phase: randFloat(0, TAU),             // 初始相位
+    innerWave: randFloat(0.5, 0.8),       // 內層 r 的波動基底
+    innerScale: randFloat(0.7, 0.85),     // 內層相對大小
   };
-}
 
-function projectTo2D(p, rotX, rotY, rotZ) {
-  let x = p.x * Math.cos(rotY) - p.z * Math.sin(rotY);
-  let z = p.x * Math.sin(rotY) + p.z * Math.cos(rotY);
-  let y = p.y;
-  const y2 = y * Math.cos(rotX) - z * Math.sin(rotX);
-  const z2 = y * Math.sin(rotX) + z * Math.cos(rotX);
-  const x3 = x * Math.cos(rotZ) - y2 * Math.sin(rotZ);
-  const y3 = x * Math.sin(rotZ) + y2 * Math.cos(rotZ);
-  return { x: x3, y: y3, depth: z2 };
-}
+  const animDur = 120;
+  const breathSec = (animDur / (daily.breathRate * 10)).toFixed(0);
 
-function sampleCY(n, alphaSteps, betaSteps, k2, rotX, rotY, rotZ, scale, cx, cy) {
-  const points = [];
-  const betaMin = 0.05;
-  const betaMax = Math.PI / 2 - 0.05;
-  for (let k1 = 0; k1 < n; k1++) {
-    for (let ai = 0; ai <= alphaSteps; ai++) {
-      for (let bi = 0; bi <= betaSteps; bi++) {
-        const alpha = (ai / alphaSteps) * (2 * Math.PI) / n;
-        const beta = betaMin + (bi / betaSteps) * (betaMax - betaMin);
-        const p4d = calabiYauPoint(n, alpha, beta, k1, k2);
-        const p2d = projectTo2D(p4d, rotX, rotY, rotZ);
-        points.push({
-          sx: cx + p2d.x * scale,
-          sy: cy + p2d.y * scale,
-          depth: p2d.depth,
-          alpha: ai / alphaSteps,
-          beta: bi / betaSteps,
-          k1,
-        });
-      }
+  console.log(`  vitality: ${daily.twistAmp.toFixed(2)} rad (${(daily.twistAmp / Math.PI * 180).toFixed(0)}°), breath: ~${breathSec}s/cycle`);
+
+  // 產生所有幀的路徑 d 值
+  const outerFrames = [];
+  const innerFrames = [];
+
+  for (let f = 0; f < FRAMES; f++) {
+    const angle = (f / FRAMES) * ANGLE_CYCLE;
+    const outerF = [];
+    const innerF = [];
+    for (let k = 0; k < n; k++) {
+      outerF.push(computeCurvePoints(n, k, angle, 'outer', scale, daily));
+      innerF.push(computeCurvePoints(n, k, angle, 'inner', scale, daily));
     }
+    outerFrames.push(outerF);
+    innerFrames.push(innerF);
   }
-  return points;
-}
 
-// ============================================================
-// 演算法 1：發光曲面
-// ============================================================
-function drawLuminousSurface(ctx, palette, params) {
-  const { n, k2, rotX, rotY, rotZ, scale } = params;
-  const points = sampleCY(n, 100, 25, k2, rotX, rotY, rotZ, scale, CX, CY_CENTER);
-  points.sort((a, b) => a.depth - b.depth);
+  // 組裝路徑 metadata
+  const paths = [];
 
-  const minD = Math.min(...points.map((p) => p.depth));
-  const maxD = Math.max(...points.map((p) => p.depth));
-  const range = maxD - minD || 1;
+  for (let k = 0; k < n; k++) {
+    const foldHue = hueOffset + (k / n) * 360;
 
-  for (const p of points) {
-    const t = (p.depth - minD) / range;
-    const ci = Math.floor(t * (palette.length - 1));
-    const ct = t * (palette.length - 1) - ci;
-    const color = lerpColor(
-      palette[Math.min(ci, palette.length - 1)],
-      palette[Math.min(ci + 1, palette.length - 1)],
-      ct
-    );
-    ctx.globalAlpha = 0.3 + t * 0.5;
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(p.sx, p.sy, 1.2 + t * 1.8, 0, Math.PI * 2);
-    ctx.fill();
+    // ── 核心線：高亮度主曲線 ──
+    paths.push({
+      stroke: hsl(foldHue, 80, 85),
+      width: 1.3,
+      opacity: 0.50,
+      dFrames: outerFrames.map(f => f[k]),
+    });
+
+    // ── 殘影：偏移 1 幀，模擬 p5.js 半透明背景的拖尾 ──
+    paths.push({
+      stroke: hsl(foldHue, 70, 78),
+      width: 3.0,
+      opacity: 0.10,
+      dFrames: outerFrames.map((_, f) =>
+        outerFrames[(f - 1 + FRAMES) % FRAMES][k]
+      ),
+    });
+
+    // ── 內層結構線 ──
+    paths.push({
+      stroke: hsl(foldHue, 55, 65),
+      width: 0.6,
+      opacity: 0.20,
+      dFrames: innerFrames.map(f => f[k]),
+    });
   }
+
+  return { n, paths, animDur, FRAMES };
 }
 
 // ============================================================
-// 演算法 2：線框網格
+// 4 個 Calabi-Yau 變體
 // ============================================================
-function drawWireframe(ctx, palette, params) {
-  const { n, k2, rotX, rotY, rotZ, scale } = params;
-  const alphaSteps = 50;
-  const betaSteps = 12;
-  const betaMin = 0.05;
-  const betaMax = Math.PI / 2 - 0.05;
 
-  for (let k1 = 0; k1 < n; k1++) {
-    // alpha 方向曲線
-    for (let bi = 0; bi <= betaSteps; bi++) {
-      const beta = betaMin + (bi / betaSteps) * (betaMax - betaMin);
-      ctx.beginPath();
-      ctx.strokeStyle = palette[bi % palette.length];
-      ctx.lineWidth = 0.6 + (bi / betaSteps) * 0.8;
-      ctx.globalAlpha = 0.25 + (bi / betaSteps) * 0.45;
-      for (let ai = 0; ai <= alphaSteps; ai++) {
-        const alpha = (ai / alphaSteps) * (2 * Math.PI) / n;
-        const p4d = calabiYauPoint(n, alpha, beta, k1, k2);
-        const p2d = projectTo2D(p4d, rotX, rotY, rotZ);
-        const sx = CX + p2d.x * scale;
-        const sy = CY_CENTER + p2d.y * scale;
-        if (ai === 0) ctx.moveTo(sx, sy);
-        else ctx.lineTo(sx, sy);
-      }
-      ctx.stroke();
-    }
-
-    // beta 方向曲線
-    for (let ai = 0; ai <= alphaSteps; ai += 3) {
-      const alpha = (ai / alphaSteps) * (2 * Math.PI) / n;
-      ctx.beginPath();
-      ctx.strokeStyle = palette[palette.length - 1];
-      ctx.lineWidth = 0.4;
-      ctx.globalAlpha = 0.15;
-      for (let bi = 0; bi <= betaSteps; bi++) {
-        const beta = betaMin + (bi / betaSteps) * (betaMax - betaMin);
-        const p4d = calabiYauPoint(n, alpha, beta, k1, k2);
-        const p2d = projectTo2D(p4d, rotX, rotY, rotZ);
-        const sx = CX + p2d.x * scale;
-        const sy = CY_CENTER + p2d.y * scale;
-        if (bi === 0) ctx.moveTo(sx, sy);
-        else ctx.lineTo(sx, sy);
-      }
-      ctx.stroke();
-    }
-  }
-}
+const THEMES = [
+  { name: 'Calabi-Yau Quintic',  n: 5 },
+  { name: 'Calabi-Yau Sextic',   n: 6 },
+  { name: 'Calabi-Yau Septic',   n: 7 },
+];
 
 // ============================================================
-// 演算法 3：截面疊加
+// 組裝 SVG
 // ============================================================
-function drawCrossSections(ctx, palette, params) {
-  const { n, k2, rotX, rotY, rotZ, scale } = params;
-  const sections = 25;
-  const alphaSteps = 150;
-  const betaMin = 0.08;
-  const betaMax = Math.PI / 2 - 0.08;
 
-  for (let si = 0; si < sections; si++) {
-    const beta = betaMin + (si / (sections - 1)) * (betaMax - betaMin);
-    const t = si / (sections - 1);
-    const ci = Math.floor(t * (palette.length - 1));
-    const ct = t * (palette.length - 1) - ci;
-    const color = lerpColor(
-      palette[Math.min(ci, palette.length - 1)],
-      palette[Math.min(ci + 1, palette.length - 1)],
-      ct
-    );
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 0.8 + t * 1.5;
-    ctx.globalAlpha = 0.2 + t * 0.5;
+function buildSVG(result, bgColor, watermark) {
+  const { paths, animDur } = result;
 
-    for (let k1 = 0; k1 < n; k1++) {
-      ctx.beginPath();
-      for (let ai = 0; ai <= alphaSteps; ai++) {
-        const alpha = (ai / alphaSteps) * (2 * Math.PI) / n;
-        const p4d = calabiYauPoint(n, alpha, beta, k1, k2);
-        const p2d = projectTo2D(p4d, rotX, rotY, rotZ);
-        const sx = CX + p2d.x * scale;
-        const sy = CY_CENTER + p2d.y * scale;
-        if (ai === 0) ctx.moveTo(sx, sy);
-        else ctx.lineTo(sx, sy);
-      }
-      ctx.stroke();
-    }
-  }
-}
+  const css = `
+    .bg { fill: ${bgColor}; }
+    .c {
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }`;
 
-// ============================================================
-// 演算法 4：光譜點雲
-// ============================================================
-function drawSpectralCloud(ctx, palette, params) {
-  const { n, k2, rotX, rotY, rotZ, scale } = params;
-  const points = sampleCY(n, 80, 20, k2, rotX, rotY, rotZ, scale, CX, CY_CENTER);
-  points.sort((a, b) => a.depth - b.depth);
+  let pathsSVG = '';
 
-  for (const p of points) {
-    const hue = (p.k1 / n) * 360 + p.beta * 60;
-    const sat = 70 + p.beta * 30;
-    const light = 40 + p.alpha * 35;
-    ctx.fillStyle = `hsl(${hue}, ${sat}%, ${light}%)`;
-    ctx.globalAlpha = 0.35 + p.beta * 0.5;
-    ctx.beginPath();
-    ctx.arc(p.sx, p.sy, 1.0 + p.beta * 2.0, 0, Math.PI * 2);
-    ctx.fill();
-  }
-}
+  for (let pi = 0; pi < paths.length; pi++) {
+    const p = paths[pi];
+    const dValues = p.dFrames.join(';');
 
-// ============================================================
-// 演算法 5：多體共振
-// ============================================================
-function drawMultiBody(ctx, palette, params) {
-  const { rotX, rotY, rotZ } = params;
-  const bodies = [
-    { n: 3, k2: 0, offsetX: -220 },
-    { n: 5, k2: 0, offsetX: 0 },
-    { n: 7, k2: 0, offsetX: 220 },
-  ];
-  const scale = 90;
+    const style = [
+      `stroke:${p.stroke}`,
+      `stroke-width:${p.width.toFixed(2)}`,
+      `stroke-opacity:${p.opacity.toFixed(3)}`,
+    ].join(';');
 
-  for (let bi = 0; bi < bodies.length; bi++) {
-    const body = bodies[bi];
-    const cx = CX + body.offsetX;
-    const bodyRotY = rotY + bi * 0.5;
-    const points = sampleCY(
-      body.n, 60, 15, body.k2, rotX, bodyRotY, rotZ, scale, cx, CY_CENTER
-    );
-    points.sort((a, b) => a.depth - b.depth);
-
-    const bp = [
-      palette[bi % palette.length],
-      palette[(bi + 1) % palette.length],
-      palette[(bi + 2) % palette.length],
-    ];
-
-    for (const p of points) {
-      const color = lerpColor(bp[0], bp[2], p.beta);
-      ctx.fillStyle = color;
-      ctx.globalAlpha = 0.3 + p.beta * 0.5;
-      ctx.beginPath();
-      ctx.arc(p.sx, p.sy, 1.0 + p.beta * 1.5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    ctx.globalAlpha = 0.25;
-    ctx.fillStyle = palette[bi % palette.length];
-    ctx.font = '11px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText(`n=${body.n}`, cx, CY_CENTER + scale + 20);
-  }
-}
-
-// ============================================================
-// 演算法 6：拓撲層次
-// ============================================================
-function drawTopologicalLayers(ctx, palette, params) {
-  const { n, k2, rotX, rotY, rotZ, scale } = params;
-  const alphaSteps = 80;
-  const betaSteps = 15;
-  const betaMin = 0.05;
-  const betaMax = Math.PI / 2 - 0.05;
-
-  for (let k1 = 0; k1 < n; k1++) {
-    const color = palette[k1 % palette.length];
-
-    for (let bi = 0; bi < betaSteps; bi++) {
-      const beta1 = betaMin + (bi / betaSteps) * (betaMax - betaMin);
-      const beta2 = betaMin + ((bi + 1) / betaSteps) * (betaMax - betaMin);
-
-      for (let ai = 0; ai < alphaSteps; ai++) {
-        const a1 = (ai / alphaSteps) * (2 * Math.PI) / n;
-        const a2 = ((ai + 1) / alphaSteps) * (2 * Math.PI) / n;
-
-        const s00 = projectTo2D(calabiYauPoint(n, a1, beta1, k1, k2), rotX, rotY, rotZ);
-        const s10 = projectTo2D(calabiYauPoint(n, a2, beta1, k1, k2), rotX, rotY, rotZ);
-        const s01 = projectTo2D(calabiYauPoint(n, a1, beta2, k1, k2), rotX, rotY, rotZ);
-        const s11 = projectTo2D(calabiYauPoint(n, a2, beta2, k1, k2), rotX, rotY, rotZ);
-
-        const avgDepth = (s00.depth + s10.depth + s01.depth + s11.depth) / 4;
-        const depthFactor = (avgDepth + 1.5) / 3;
-
-        ctx.globalAlpha = 0.08 + depthFactor * 0.15;
-        ctx.fillStyle = color;
-        ctx.beginPath();
-        ctx.moveTo(CX + s00.x * scale, CY_CENTER + s00.y * scale);
-        ctx.lineTo(CX + s10.x * scale, CY_CENTER + s10.y * scale);
-        ctx.lineTo(CX + s11.x * scale, CY_CENTER + s11.y * scale);
-        ctx.lineTo(CX + s01.x * scale, CY_CENTER + s01.y * scale);
-        ctx.closePath();
-        ctx.fill();
-      }
-    }
-
-    // 邊緣曲線
-    ctx.beginPath();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.2;
-    ctx.globalAlpha = 0.6;
-    for (let ai = 0; ai <= alphaSteps; ai++) {
-      const alpha = (ai / alphaSteps) * (2 * Math.PI) / n;
-      const p2d = projectTo2D(
-        calabiYauPoint(n, alpha, betaMax, k1, k2), rotX, rotY, rotZ
-      );
-      const sx = CX + p2d.x * scale;
-      const sy = CY_CENTER + p2d.y * scale;
-      if (ai === 0) ctx.moveTo(sx, sy);
-      else ctx.lineTo(sx, sy);
-    }
-    ctx.stroke();
-  }
-}
-
-// ============================================================
-// 演算法 7：弦與粒子（動態線條版）
-// 視角僅微幅擺動，動態由線條生長、波動、呼吸、粒子流動驅動
-// ============================================================
-function drawStringParticles(ctx, palette, params) {
-  const { n, k2, rotX, rotY, rotZ, scale, progress = 0 } = params;
-  const tau = Math.PI * 2;
-  const t = progress; // 0→1 無縫循環
-  const PHI = (1 + Math.sqrt(5)) / 2; // 黃金比例，用於分散相位
-  const alphaSteps = 80;
-  const betaSteps = 18;
-  const betaMin = 0.05;
-  const betaMax = Math.PI / 2 - 0.05;
-
-  // 視角緩慢擺動，用多頻 sin 疊加避免單一週期感
-  const viewRotY = rotY * 0.03
-    + Math.sin(t * tau) * 0.12
-    + Math.sin(t * tau * 3 + 1.2) * 0.04;
-
-  // 收集所有線段資料
-  const lines = [];
-  let lineIdx = 0;
-  for (let k1 = 0; k1 < n; k1++) {
-    // alpha 方向弦線
-    for (let bi = 0; bi <= betaSteps; bi += 2) {
-      const beta = betaMin + (bi / betaSteps) * (betaMax - betaMin);
-      const pts = [];
-      for (let ai = 0; ai <= alphaSteps; ai++) {
-        const alpha = (ai / alphaSteps) * tau / n;
-        const p4d = calabiYauPoint(n, alpha, beta, k1, k2);
-        const p2d = projectTo2D(p4d, rotX, viewRotY, rotZ);
-
-        // 波動：多頻疊加避免規律感
-        const pos = ai / alphaSteps;
-        const waveAmp = 1.5 + (bi / betaSteps) * 1.5;
-        const wave = (
-          Math.sin(t * tau * 2 + lineIdx * PHI * tau + pos * tau * 1.5) * 0.6
-          + Math.sin(t * tau * 3 + lineIdx * 1.3 + pos * tau * 2.7) * 0.4
-        ) * waveAmp;
-
-        pts.push({
-          sx: CX + p2d.x * scale + wave * Math.cos(alpha + Math.PI / 2),
-          sy: CY_CENTER + p2d.y * scale + wave * Math.sin(alpha + Math.PI / 2),
-          depth: p2d.depth,
-        });
-      }
-      const avgDepth = pts.reduce((s, p) => s + p.depth, 0) / pts.length;
-      lines.push({ pts, color: palette[k1 % palette.length], avgDepth, k1, lineIdx });
-      lineIdx++;
-    }
-
-    // beta 方向弦線（較稀疏）
-    for (let ai = 0; ai <= alphaSteps; ai += 5) {
-      const alpha = (ai / alphaSteps) * tau / n;
-      const pts = [];
-      for (let bi = 0; bi <= betaSteps; bi++) {
-        const beta = betaMin + (bi / betaSteps) * (betaMax - betaMin);
-        const p4d = calabiYauPoint(n, alpha, beta, k1, k2);
-        const p2d = projectTo2D(p4d, rotX, viewRotY, rotZ);
-
-        const pos = bi / betaSteps;
-        const waveAmp = 1.5;
-        const wave = (
-          Math.sin(t * tau * 2 + lineIdx * PHI * tau + pos * tau * 1.5) * 0.6
-          + Math.sin(t * tau * 3 + lineIdx * 1.1 + pos * tau * 2.3) * 0.4
-        ) * waveAmp;
-
-        pts.push({
-          sx: CX + p2d.x * scale + wave * Math.sin(alpha),
-          sy: CY_CENTER + p2d.y * scale + wave * Math.cos(alpha),
-          depth: p2d.depth,
-        });
-      }
-      const avgDepth = pts.reduce((s, p) => s + p.depth, 0) / pts.length;
-      lines.push({ pts, color: palette[(k1 + 2) % palette.length], avgDepth, k1, lineIdx });
-      lineIdx++;
-    }
+    pathsSVG += `<path class="c" style="${style}" d="${p.dFrames[0]}">`;
+    pathsSVG += `<animate attributeName="d" values="${dValues}" dur="${animDur}s" repeatCount="indefinite" calcMode="linear"/>`;
+    pathsSVG += `</path>`;
   }
 
-  // 依深度排序（遠的先畫）
-  lines.sort((a, b) => a.avgDepth - b.avgDepth);
-
-  // 全域深度範圍
-  let globalMinD = Infinity, globalMaxD = -Infinity;
-  for (const line of lines) {
-    for (const p of line.pts) {
-      if (p.depth < globalMinD) globalMinD = p.depth;
-      if (p.depth > globalMaxD) globalMaxD = p.depth;
-    }
-  }
-  const depthRange = globalMaxD - globalMinD || 1;
-
-  for (const line of lines) {
-    const depthNorm = (line.avgDepth - globalMinD) / depthRange;
-
-    // 用黃金比例分散相位，避免同步脈動
-    const phase = line.lineIdx * PHI;
-
-    // 呼吸：多頻疊加，幅度收小，避免整體同步感
-    const breath = 0.7 + 0.3 * (
-      Math.sin(t * tau + phase * tau) * 0.5
-      + Math.sin(t * tau * 2 + phase * 2.3) * 0.3
-      + Math.sin(t * tau * 5 + phase * 0.7) * 0.2
-    );
-
-    // 線條全部顯示，改用透明度漸變代替截斷來製造動態
-    // 不再用 visibleCount 截斷，消除分段感
-    ctx.beginPath();
-    ctx.strokeStyle = line.color;
-    ctx.lineWidth = (0.4 + depthNorm * 1.2) * (0.7 + breath * 0.5);
-    ctx.globalAlpha = (0.15 + depthNorm * 0.45) * breath;
-    for (let i = 0; i < line.pts.length; i++) {
-      const p = line.pts[i];
-      if (i === 0) ctx.moveTo(p.sx, p.sy);
-      else ctx.lineTo(p.sx, p.sy);
-    }
-    ctx.stroke();
-
-    // 粒子沿線條流動
-    const particleCount = Math.floor(3 + depthNorm * 6);
-    for (let pi = 0; pi < particleCount; pi++) {
-      // 用黃金比例分佈粒子初始位置，加上不同速度的流動
-      const speed = 1 + (line.lineIdx % 3) * 0.5;
-      const rawT = ((pi * PHI + t * speed + phase * 0.1) % 1);
-      const idx = rawT * (line.pts.length - 1);
-      const i0 = Math.floor(idx);
-      const i1 = Math.min(i0 + 1, line.pts.length - 1);
-      const frac = idx - i0;
-      const px = line.pts[i0].sx + (line.pts[i1].sx - line.pts[i0].sx) * frac;
-      const py = line.pts[i0].sy + (line.pts[i1].sy - line.pts[i0].sy) * frac;
-      const pDepth = line.pts[i0].depth + (line.pts[i1].depth - line.pts[i0].depth) * frac;
-      const pDepthNorm = (pDepth - globalMinD) / depthRange;
-      const radius = 1.0 + pDepthNorm * 2.5;
-
-      // 粒子自身脈動（各粒子不同相位）
-      const pBreath = 0.6 + 0.4 * Math.sin(t * tau * 3 + pi * PHI * tau + phase);
-
-      // 外層光暈
-      ctx.globalAlpha = (0.05 + pDepthNorm * 0.1) * pBreath;
-      ctx.fillStyle = line.color;
-      ctx.beginPath();
-      ctx.arc(px, py, radius * 3, 0, tau);
-      ctx.fill();
-
-      // 中層光暈
-      ctx.globalAlpha = (0.12 + pDepthNorm * 0.2) * pBreath;
-      ctx.beginPath();
-      ctx.arc(px, py, radius * 1.6, 0, tau);
-      ctx.fill();
-
-      // 核心亮點
-      ctx.globalAlpha = (0.4 + pDepthNorm * 0.4) * pBreath;
-      ctx.fillStyle = '#FFFFFF';
-      ctx.beginPath();
-      ctx.arc(px, py, radius * 0.6, 0, tau);
-      ctx.fill();
-    }
-  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${WIDTH} ${HEIGHT}" width="${WIDTH}" height="${HEIGHT}">
+<style>${css}</style>
+<rect class="bg" width="${WIDTH}" height="${HEIGHT}"/>
+<g transform="translate(${CX},${CY})">
+${pathsSVG}
+</g>
+<text x="${WIDTH - 15}" y="${HEIGHT - 12}" fill="white" fill-opacity="0.2" font-family="monospace" font-size="10" text-anchor="end">${watermark}</text>
+</svg>`;
 }
 
 // ============================================================
 // 主程式
 // ============================================================
+
 function main() {
-  const canvas = createCanvas(WIDTH, HEIGHT);
-  const ctx = canvas.getContext('2d');
-
-  const palette = shuffle(pick(PALETTES));
-  const bgOptions = ['#05050F', '#0A0A1A', '#0D0D1F', '#080812', '#0B0B18', '#060610'];
-  const bgColor = pick(bgOptions);
-
-  const algorithms = [
-    drawLuminousSurface,
-    drawWireframe,
-    drawStringParticles,
-    drawSpectralCloud,
-    drawMultiBody,
-    drawTopologicalLayers,
-    drawCrossSections,
-  ];
-  // 依日期輪替演算法（每天固定一種，7 天一輪）
   const dayOfYear = Math.floor(
     (new Date(today) - new Date(today.slice(0, 4) + '-01-01')) / 86400000
   );
-  const algo = algorithms[dayOfYear % algorithms.length];
-
-  // 固定參數（整段動畫不變），只有 rotY 逐幀遞增
-  const n = pick([3, 4, 5, 6]);
-  const k2 = randInt(0, n - 1);
-  const rotX = randFloat(0.3, 1.2);
-  const baseRotY = randFloat(0, Math.PI * 2);
-  const rotZ = randFloat(-0.3, 0.3);
-  const scale = randFloat(140, 180);
+  const theme = THEMES[dayOfYear % THEMES.length];
+  const bgOptions = ['#04040E', '#06061A', '#080814', '#050510', '#0A0A12'];
+  const bgColor = pick(bgOptions);
 
   console.log(`Date: ${today}`);
-  console.log(`Algorithm: ${algo.name}`);
-  console.log(`n=${n}, k2=${k2}`);
-  console.log(`Palette: ${palette.join(', ')}`);
-  console.log(`Generating ${FRAMES} frames...`);
+  console.log(`Theme: ${theme.name}`);
+  console.log('Generating...');
 
-  const gif = GIFEncoder();
+  const result = generateCalabiYau(theme.n);
+  const watermark = `${today}  ·  ${theme.name}`;
+  const svg = buildSVG(result, bgColor, watermark);
 
-  for (let f = 0; f < FRAMES; f++) {
-    // 清除畫布
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = bgColor;
-    ctx.fillRect(0, 0, WIDTH, HEIGHT);
-
-    // rotY 從 0 轉到 2π 形成無縫循環
-    const progress = f / FRAMES;
-    const rotY = baseRotY + progress * 2 * Math.PI;
-    const params = { n, k2, rotX, rotY, rotZ, scale, progress };
-
-    algo(ctx, palette, params);
-
-    // 右下角日期
-    ctx.globalAlpha = 0.3;
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = '11px monospace';
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'bottom';
-    ctx.fillText(today, WIDTH - 15, HEIGHT - 12);
-
-    const { data } = ctx.getImageData(0, 0, WIDTH, HEIGHT);
-    const pal = quantize(data, 256);
-    const index = applyPalette(data, pal);
-    gif.writeFrame(index, WIDTH, HEIGHT, {
-      palette: pal,
-      delay: FRAME_DELAY,
-      repeat: 0,
-    });
-    process.stdout.write(`\rFrame ${f + 1}/${FRAMES}`);
-  }
-
-  gif.finish();
-  fs.writeFileSync('art.gif', Buffer.from(gif.bytes()));
-  console.log('\nGenerated art.gif successfully!');
+  fs.writeFileSync('art.svg', svg);
+  const sizeKB = (Buffer.byteLength(svg) / 1024).toFixed(1);
+  console.log(`Generated art.svg (${sizeKB} KB, ${result.paths.length} paths, ${result.FRAMES} frames, ${result.animDur}s cycle)`);
 }
 
 main();
